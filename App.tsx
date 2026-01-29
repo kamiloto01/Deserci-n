@@ -13,7 +13,7 @@ const App: React.FC = () => {
   const [chatResponse, setChatResponse] = useState<string | null>(null);
   const [activeRanking, setActiveRanking] = useState<RankingType>(RankingType.UNIVERSIDADES);
   
-  const [selectedIES, setSelectedIES] = useState<string>('1711'); // La Sabana
+  const [selectedIES, setSelectedIES] = useState<string>('1711'); // La Sabana por defecto en Dashboard
   const [iesSearch, setIesSearch] = useState('');
   const [isIesListOpen, setIsIesListOpen] = useState(false);
   const iesSelectorRef = useRef<HTMLDivElement>(null);
@@ -94,6 +94,26 @@ const App: React.FC = () => {
     return { val: '0%', label: 'Estable', trend: 'neutral' as const, description: 'Sin cambios semestrales.' };
   }, [latestDataForIES, currentIESData]);
 
+  // Nueva lógica de búsqueda para evitar el "pegado" con La Sabana
+  const findMentionedIES = (q: string) => {
+    const qLow = q.toLowerCase();
+    
+    // Mapeo de palabras clave a IES IDs específicos
+    if (qLow.includes("rosario")) return iesList.find(i => i.name.toLowerCase().includes("rosario"))?.id;
+    if (qLow.includes("andes")) return iesList.find(i => i.name.toLowerCase().includes("andes"))?.id;
+    if (qLow.includes("javeriana")) return iesList.find(i => i.name.toLowerCase().includes("javeriana"))?.id;
+    if (qLow.includes("sabana")) return "1711";
+    if (qLow.includes("nacional") && !qLow.includes("abierta")) return "1101";
+    
+    // Búsqueda genérica por nombre en la lista
+    const genericMatch = iesList.find(ies => 
+      qLow.includes(ies.name.toLowerCase()) || 
+      (ies.name.length > 10 && qLow.includes(ies.name.toLowerCase().substring(0, 10)))
+    );
+    
+    return genericMatch?.id;
+  };
+
   const handleAnalysis = async (e?: React.FormEvent, directQuery?: string) => {
     if (e) e.preventDefault();
     const finalQuery = directQuery || query;
@@ -105,59 +125,58 @@ const App: React.FC = () => {
     setActiveTab('chat');
 
     try {
-      const queryLower = finalQuery.toLowerCase();
-      // Refined extraction logic
-      const mentionedIES = DATA_UNIVERSIDADES.find(ies => 
-        (queryLower.includes(ies.NombreInstitucion.toLowerCase()) && ies.NombreInstitucion.length > 5) || 
-        queryLower.includes(` ${ies.IES} `) ||
-        (queryLower.includes("rosario") && ies.NombreInstitucion.toLowerCase().includes("rosario")) ||
-        (queryLower.includes("andes") && ies.NombreInstitucion.toLowerCase().includes("andes")) ||
-        (queryLower.includes("sabana") && ies.NombreInstitucion.toLowerCase().includes("sabana"))
-      );
-
-      const subjectIESID = mentionedIES ? mentionedIES.IES : selectedIES;
+      // 1. Identificar la IES de la pregunta ignorando la seleccionada en Dashboard si es posible
+      const mentionedIESID = findMentionedIES(finalQuery);
+      const subjectIESID = mentionedIESID || selectedIES;
+      
       const subjectData = DATA_UNIVERSIDADES.filter(d => d.IES === subjectIESID).sort((a, b) => a.Periodo.localeCompare(b.Periodo));
-      const subjectName = subjectData[0]?.NombreInstitucion || 'Institución Desconocida';
+      const subjectName = subjectData[0]?.NombreInstitucion || 'Institución Consultada';
 
-      // Benchmark logic: If subject is Sabana, compare against the leader (Rank 1) or Los Andes
-      const isSabanaSubject = subjectIESID === '1711';
-      const benchmarkIESID = isSabanaSubject ? '1813' : '1711'; // Compare vs Andes (1813) if Sabana, else vs Sabana (1711)
-      const benchmarkData = DATA_UNIVERSIDADES.filter(d => d.IES === benchmarkIESID).sort((a, b) => a.Periodo.localeCompare(b.Periodo));
-      const benchmarkName = isSabanaSubject ? "U. de los Andes (Referente Top)" : "U. de La Sabana (Benchmark)";
+      // 2. Determinar Benchmark Dinámico
+      // Si la consultada es Sabana, comparamos contra Andes. Si no, comparamos contra Sabana.
+      const isSabana = subjectIESID === '1711';
+      const benchmarkID = isSabana ? '1813' : '1711';
+      const benchmarkData = DATA_UNIVERSIDADES.filter(d => d.IES === benchmarkID).sort((a, b) => a.Periodo.localeCompare(b.Periodo));
+      const benchmarkName = benchmarkData[0]?.NombreInstitucion || 'Referente';
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const prompt = `
-        Eres un Analista Experto Senior en Educación Superior en Colombia. 
-        Analiza a la institución: ${subjectName}.
-        
-        DATOS DE LA IES ANALIZADA:
+        Eres un Analista Experto en Retención Estudiantil. 
+        TU MISIÓN: Analizar la deserción de la institución "${subjectName}" usando los datos oficiales proporcionados.
+
+        REGLA CRÍTICA: NO USES INFORMACIÓN DE LA SABANA SI EL USUARIO PREGUNTÓ POR OTRA UNIVERSIDAD, EXCEPTO EN LA TABLA DE BENCHMARK.
+
+        DATOS DE LA INSTITUCIÓN A ANALIZAR (${subjectName}):
         ${JSON.stringify(subjectData)}
-        
-        DATOS DEL BENCHMARK (${benchmarkName}):
+
+        DATOS DEL BENCHMARK DE COMPARACIÓN (${benchmarkName}):
         ${JSON.stringify(benchmarkData)}
-        
-        INSTRUCCIONES DE REPORTE:
-        1. Identificación: El usuario pregunta por ${subjectName}. NUNCA lo compares consigo mismo.
-        2. Si el usuario pregunta por La Sabana, compárala contra Los Andes para ver quién tiene mejor retención.
-        3. ESTRUCTURA:
-           # INFORME ESTRATÉGICO: ${subjectName}
-           ## 📊 Resumen de Desempeño
-           (Tasa actual y ranking sectorial).
-           ## 📈 Análisis Semestral
-           (Menciona si la variación fue MEJORA o ALERTA).
-           ## ⚖️ Benchmarking vs ${benchmarkName}
-           Genera una TABLA Markdown con columnas: Periodo | Tasa ${subjectName} | Tasa ${benchmarkName} | Diferencia (p.p.).
-           (Recuerda: Diferencia = Tasa Sujeto - Tasa Benchmark).
-           ## 💡 Conclusión Analítica
-           (Párrafo ejecutivo de 3 líneas).
-        
-        Consulta: ${finalQuery}
+
+        ESTRUCTURA DEL REPORTE (USA MARKDOWN):
+        # 📋 REPORTE EJECUTIVO: ${subjectName}
+
+        ## 🔍 Diagnóstico Actual
+        Presenta la tasa de deserción del periodo más reciente (${allPeriods[0]}) y su posición en el ranking.
+
+        ## 📊 Análisis Semestral
+        Indica si la deserción subió o bajó respecto al periodo anterior. Usa porcentajes.
+
+        ## ⚖️ Benchmarking vs ${benchmarkName}
+        Crea una TABLA comparativa:
+        | Periodo | Tasa ${subjectName} | Tasa ${benchmarkName} | Diferencia (p.p.) |
+        | :--- | :--- | :--- | :--- |
+        (Genera al menos los últimos 4 periodos).
+
+        ## 💡 Recomendación Estratégica
+        Un párrafo corto sobre qué debería priorizar esta IES.
+
+        Consulta del usuario: "${finalQuery}"
       `;
 
       const response = await ai.models.generateContent({ model: 'gemini-3-flash-preview', contents: prompt });
-      setChatResponse(response.text || 'Error generando reporte.');
+      setChatResponse(response.text || 'No se pudo procesar la consulta.');
     } catch (error) {
-      setChatResponse('Error de comunicación con el motor de IA.');
+      setChatResponse('Error de red al consultar el motor de inteligencia. Por favor intenta de nuevo.');
     } finally {
       setLoading(false);
     }
@@ -182,10 +201,10 @@ const App: React.FC = () => {
         inTable = true;
         if (line.includes('---')) continue;
         const cells = line.split('|').filter(c => c.trim() !== '').map(c => c.trim());
-        tableRows.push(cells);
+        if (cells.length > 0) tableRows.push(cells);
         continue;
       } else if (inTable) {
-        output.push(generateHtmlTable(tableRows));
+        if (tableRows.length > 0) output.push(generateHtmlTable(tableRows));
         tableRows = [];
         inTable = false;
       }
@@ -238,7 +257,6 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden font-sans">
-      {/* Sidebar */}
       <aside className="w-20 md:w-64 bg-white border-r border-slate-200 flex flex-col shrink-0 z-40 shadow-sm">
         <div className="p-4 md:p-6 border-b border-slate-100 flex items-center gap-3">
           <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-bold shadow-lg shadow-indigo-100">
@@ -276,7 +294,6 @@ const App: React.FC = () => {
       </aside>
 
       <main className="flex-1 flex flex-col overflow-hidden">
-        {/* Header */}
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 shrink-0 z-30">
           <div className="flex-1 max-w-xl">
             <div className="relative group">
@@ -294,11 +311,9 @@ const App: React.FC = () => {
           </div>
         </header>
 
-        {/* Dynamic Content */}
         <div className="flex-1 overflow-y-auto p-6 md:p-10 space-y-10 pb-24">
           {activeTab === 'dashboard' && (
             <>
-              {/* Institutional Selector */}
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-8 bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
                 <div className="flex-1">
                   <h2 className="text-3xl font-black text-slate-900 tracking-tighter">Panel Estratégico</h2>
@@ -337,7 +352,6 @@ const App: React.FC = () => {
                 </div>
               </div>
 
-              {/* KPI Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                 <StatCard label="Tasa de Deserción" value={`${(latestDataForIES?.Desercion * 100 || 0).toFixed(2)}%`} subtitle={`Periodo ${selectedPeriod}`} icon={<Target className="text-indigo-600" />} color="indigo" />
                 <StatCard label="Variación Semestral" value={variationStats.val} subtitle={variationStats.label} icon={variationStats.trend === 'good' ? <ArrowDownRight className="text-green-600" /> : <ArrowUpRight className="text-red-600" />} trend={variationStats.trend} color={variationStats.trend === 'good' ? 'green' : 'red'} tooltip={variationStats.description} />
@@ -345,7 +359,6 @@ const App: React.FC = () => {
                 <StatCard label="Ranking Sectorial" value={`#${latestDataForIES?.Ranking || '---'}`} subtitle="Ranking Universidades" icon={<Database className="text-amber-600" />} color="amber" />
               </div>
 
-              {/* Charts & Context */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div className="lg:col-span-2 bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
                   <div className="flex items-center justify-between mb-8">
@@ -424,7 +437,6 @@ const App: React.FC = () => {
 
           {activeTab === 'chat' && (
             <div className="max-w-5xl mx-auto space-y-8 animate-in fade-in duration-700">
-              {/* AI Consultant Hero */}
               <div className="bg-gradient-to-br from-indigo-700 to-indigo-900 rounded-[3rem] p-12 text-white shadow-2xl relative overflow-hidden ring-4 ring-white/10">
                 <div className="relative z-10">
                   <div className="flex items-center gap-6 mb-8">
@@ -447,7 +459,6 @@ const App: React.FC = () => {
                   <div className="flex items-start gap-10">
                     <div className="w-16 h-16 rounded-[1.5rem] bg-indigo-600 flex items-center justify-center text-white shrink-0 shadow-lg shadow-indigo-100 border-4 border-indigo-100"><ClipboardList size={32} /></div>
                     <div className="flex-1 overflow-hidden">
-                      {/* Professional MD Rendering */}
                       <div className="chat-result-container prose prose-slate max-w-none prose-p:text-lg prose-strong:text-indigo-600" dangerouslySetInnerHTML={{ __html: renderMarkdown(chatResponse) }} />
                       
                       <div className="mt-16 pt-10 border-t border-slate-100">
@@ -470,7 +481,6 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* Floating Input */}
         {activeTab !== 'chat' && (
           <div className="fixed bottom-12 left-1/2 -translate-x-1/2 w-full max-w-2xl px-6 z-50 hidden md:block">
             <div className="bg-slate-900/95 backdrop-blur-3xl border border-white/20 shadow-2xl rounded-[2rem] p-3 flex items-center gap-4 focus-within:ring-8 focus-within:ring-indigo-500/10 transition-all">
