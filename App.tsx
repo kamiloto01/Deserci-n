@@ -94,24 +94,27 @@ const App: React.FC = () => {
     return { val: '0%', label: 'Estable', trend: 'neutral' as const, description: 'Sin cambios semestrales.' };
   }, [latestDataForIES, currentIESData]);
 
-  // Nueva lógica de búsqueda para evitar el "pegado" con La Sabana
+  // Lógica mejorada para detectar la IES mencionada
   const findMentionedIES = (q: string) => {
-    const qLow = q.toLowerCase();
+    const qLow = q.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Remove accents
     
-    // Mapeo de palabras clave a IES IDs específicos
-    if (qLow.includes("rosario")) return iesList.find(i => i.name.toLowerCase().includes("rosario"))?.id;
-    if (qLow.includes("andes")) return iesList.find(i => i.name.toLowerCase().includes("andes"))?.id;
-    if (qLow.includes("javeriana")) return iesList.find(i => i.name.toLowerCase().includes("javeriana"))?.id;
+    // Diccionario de sinónimos comunes
+    if (qLow.includes("rosario")) return "1714";
+    if (qLow.includes("andes")) return "1813";
+    if (qLow.includes("javeriana")) return "1701";
     if (qLow.includes("sabana")) return "1711";
     if (qLow.includes("nacional") && !qLow.includes("abierta")) return "1101";
+    if (qLow.includes("eafit")) return "1712";
+    if (qLow.includes("icesi")) return "1828";
+    if (qLow.includes("externado")) return "1706";
     
-    // Búsqueda genérica por nombre en la lista
-    const genericMatch = iesList.find(ies => 
-      qLow.includes(ies.name.toLowerCase()) || 
-      (ies.name.length > 10 && qLow.includes(ies.name.toLowerCase().substring(0, 10)))
-    );
+    // Búsqueda en lista
+    for (const ies of iesList) {
+      const nameLow = ies.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      if (qLow.includes(nameLow) && nameLow.length > 8) return ies.id;
+    }
     
-    return genericMatch?.id;
+    return null;
   };
 
   const handleAnalysis = async (e?: React.FormEvent, directQuery?: string) => {
@@ -125,58 +128,60 @@ const App: React.FC = () => {
     setActiveTab('chat');
 
     try {
-      // 1. Identificar la IES de la pregunta ignorando la seleccionada en Dashboard si es posible
-      const mentionedIESID = findMentionedIES(finalQuery);
-      const subjectIESID = mentionedIESID || selectedIES;
+      const mentionedID = findMentionedIES(finalQuery);
+      const subjectID = mentionedID || selectedIES; // Si no menciona nada, usa la del dashboard
       
-      const subjectData = DATA_UNIVERSIDADES.filter(d => d.IES === subjectIESID).sort((a, b) => a.Periodo.localeCompare(b.Periodo));
+      const subjectData = DATA_UNIVERSIDADES.filter(d => d.IES === subjectID).sort((a, b) => a.Periodo.localeCompare(b.Periodo));
       const subjectName = subjectData[0]?.NombreInstitucion || 'Institución Consultada';
 
-      // 2. Determinar Benchmark Dinámico
-      // Si la consultada es Sabana, comparamos contra Andes. Si no, comparamos contra Sabana.
-      const isSabana = subjectIESID === '1711';
-      const benchmarkID = isSabana ? '1813' : '1711';
+      // Benchmark dinámico: Si consultan Sabana, comparan contra Andes (Top 1). Si no, contra Sabana.
+      const isConsultingSabana = subjectID === '1711';
+      const benchmarkID = isConsultingSabana ? '1813' : '1711';
       const benchmarkData = DATA_UNIVERSIDADES.filter(d => d.IES === benchmarkID).sort((a, b) => a.Periodo.localeCompare(b.Periodo));
       const benchmarkName = benchmarkData[0]?.NombreInstitucion || 'Referente';
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const prompt = `
-        Eres un Analista Experto en Retención Estudiantil. 
-        TU MISIÓN: Analizar la deserción de la institución "${subjectName}" usando los datos oficiales proporcionados.
+        Eres un Consultor Senior de Retención Estudiantil en Colombia.
+        TU OBJETIVO: Realizar un análisis crítico de deserción para la institución: "${subjectName}".
+        
+        REGLA DE ORO: SI EL USUARIO PREGUNTA POR "${subjectName}", NO MENCIONES DATOS DE OTRAS UNIVERSIDADES (COMO LA SABANA) FUERA DE LA TABLA DE COMPARATIVA.
+        
+        DATOS HISTÓRICOS DE ${subjectName}:
+        ${JSON.stringify(subjectData.map(d => ({ p: d.Periodo, t: (d.Desercion * 100).toFixed(2) + '%', r: d.Ranking })))}
+        
+        DATOS DE REFERENCIA (${benchmarkName}):
+        ${JSON.stringify(benchmarkData.map(d => ({ p: d.Periodo, t: (d.Desercion * 100).toFixed(2) + '%' })))}
 
-        REGLA CRÍTICA: NO USES INFORMACIÓN DE LA SABANA SI EL USUARIO PREGUNTÓ POR OTRA UNIVERSIDAD, EXCEPTO EN LA TABLA DE BENCHMARK.
-
-        DATOS DE LA INSTITUCIÓN A ANALIZAR (${subjectName}):
-        ${JSON.stringify(subjectData)}
-
-        DATOS DEL BENCHMARK DE COMPARACIÓN (${benchmarkName}):
-        ${JSON.stringify(benchmarkData)}
-
-        ESTRUCTURA DEL REPORTE (USA MARKDOWN):
-        # 📋 REPORTE EJECUTIVO: ${subjectName}
-
-        ## 🔍 Diagnóstico Actual
-        Presenta la tasa de deserción del periodo más reciente (${allPeriods[0]}) y su posición en el ranking.
-
-        ## 📊 Análisis Semestral
-        Indica si la deserción subió o bajó respecto al periodo anterior. Usa porcentajes.
-
+        USA ESTE FORMATO DE REPORTE:
+        # 📄 REPORTE DE CONSULTORÍA: ${subjectName}
+        
+        ## 📊 Diagnóstico de Retención
+        Resume la situación actual (periodo ${allPeriods[0]}). Menciona la tasa exacta y su posición competitiva.
+        
+        ## 📈 Evolución y Tendencias
+        Analiza si ha mejorado o empeorado. Sé ejecutivo.
+        
         ## ⚖️ Benchmarking vs ${benchmarkName}
-        Crea una TABLA comparativa:
-        | Periodo | Tasa ${subjectName} | Tasa ${benchmarkName} | Diferencia (p.p.) |
+        | Periodo | Tasa ${subjectName} | Tasa ${benchmarkName} | Brecha (p.p.) |
         | :--- | :--- | :--- | :--- |
-        (Genera al menos los últimos 4 periodos).
-
+        (Incluye los últimos 5 periodos).
+        
         ## 💡 Recomendación Estratégica
-        Un párrafo corto sobre qué debería priorizar esta IES.
-
-        Consulta del usuario: "${finalQuery}"
+        Una conclusión breve de alto nivel.
+        
+        Pregunta del usuario: "${finalQuery}"
       `;
 
-      const response = await ai.models.generateContent({ model: 'gemini-3-flash-preview', contents: prompt });
-      setChatResponse(response.text || 'No se pudo procesar la consulta.');
-    } catch (error) {
-      setChatResponse('Error de red al consultar el motor de inteligencia. Por favor intenta de nuevo.');
+      const response = await ai.models.generateContent({ 
+        model: 'gemini-3-pro-preview', 
+        contents: [{ parts: [{ text: prompt }] }] 
+      });
+      
+      setChatResponse(response.text || 'El motor de análisis no devolvió resultados.');
+    } catch (error: any) {
+      console.error("Gemini API Error:", error);
+      setChatResponse('Ocurrió un error en la conexión. Asegúrate de que el prompt sea específico y la conexión a internet sea estable.');
     } finally {
       setLoading(false);
     }
