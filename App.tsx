@@ -94,11 +94,9 @@ const App: React.FC = () => {
     return { val: '0%', label: 'Estable', trend: 'neutral' as const, description: 'Sin cambios semestrales.' };
   }, [latestDataForIES, currentIESData]);
 
-  // Lógica mejorada para detectar la IES mencionada
   const findMentionedIES = (q: string) => {
-    const qLow = q.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // Remove accents
+    const qLow = q.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); 
     
-    // Diccionario de sinónimos comunes
     if (qLow.includes("rosario")) return "1714";
     if (qLow.includes("andes")) return "1813";
     if (qLow.includes("javeriana")) return "1701";
@@ -107,13 +105,13 @@ const App: React.FC = () => {
     if (qLow.includes("eafit")) return "1712";
     if (qLow.includes("icesi")) return "1828";
     if (qLow.includes("externado")) return "1706";
+    if (qLow.includes("libre")) return "1807";
+    if (qLow.includes("norte") && qLow.includes("universidad")) return "1713";
     
-    // Búsqueda en lista
     for (const ies of iesList) {
       const nameLow = ies.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
       if (qLow.includes(nameLow) && nameLow.length > 8) return ies.id;
     }
-    
     return null;
   };
 
@@ -129,59 +127,60 @@ const App: React.FC = () => {
 
     try {
       const mentionedID = findMentionedIES(finalQuery);
-      const subjectID = mentionedID || selectedIES; // Si no menciona nada, usa la del dashboard
+      const subjectID = mentionedID || selectedIES; 
       
-      const subjectData = DATA_UNIVERSIDADES.filter(d => d.IES === subjectID).sort((a, b) => a.Periodo.localeCompare(b.Periodo));
-      const subjectName = subjectData[0]?.NombreInstitucion || 'Institución Consultada';
+      const subjectHistory = DATA_UNIVERSIDADES
+        .filter(d => d.IES === subjectID)
+        .sort((a, b) => b.Periodo.localeCompare(a.Periodo))
+        .slice(0, 6) // Solo últimos 6 periodos para evitar carga pesada
+        .map(d => ({ p: d.Periodo, t: (d.Desercion * 100).toFixed(2) + '%', r: d.Ranking }));
 
-      // Benchmark dinámico: Si consultan Sabana, comparan contra Andes (Top 1). Si no, contra Sabana.
+      const subjectName = DATA_UNIVERSIDADES.find(d => d.IES === subjectID)?.NombreInstitucion || 'Institución';
+
       const isConsultingSabana = subjectID === '1711';
       const benchmarkID = isConsultingSabana ? '1813' : '1711';
-      const benchmarkData = DATA_UNIVERSIDADES.filter(d => d.IES === benchmarkID).sort((a, b) => a.Periodo.localeCompare(b.Periodo));
-      const benchmarkName = benchmarkData[0]?.NombreInstitucion || 'Referente';
+      const benchmarkHistory = DATA_UNIVERSIDADES
+        .filter(d => d.IES === benchmarkID)
+        .sort((a, b) => b.Periodo.localeCompare(a.Periodo))
+        .slice(0, 6)
+        .map(d => ({ p: d.Periodo, t: (d.Desercion * 100).toFixed(2) + '%' }));
+      
+      const benchmarkName = isConsultingSabana ? 'Universidad de los Andes' : 'Universidad de La Sabana';
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const prompt = `
-        Eres un Consultor Senior de Retención Estudiantil en Colombia.
-        TU OBJETIVO: Realizar un análisis crítico de deserción para la institución: "${subjectName}".
+        Actúa como un Consultor Senior en Retención Universitaria. 
+        Analiza la deserción de: "${subjectName}" (ID: ${subjectID}).
         
-        REGLA DE ORO: SI EL USUARIO PREGUNTA POR "${subjectName}", NO MENCIONES DATOS DE OTRAS UNIVERSIDADES (COMO LA SABANA) FUERA DE LA TABLA DE COMPARATIVA.
-        
-        DATOS HISTÓRICOS DE ${subjectName}:
-        ${JSON.stringify(subjectData.map(d => ({ p: d.Periodo, t: (d.Desercion * 100).toFixed(2) + '%', r: d.Ranking })))}
-        
-        DATOS DE REFERENCIA (${benchmarkName}):
-        ${JSON.stringify(benchmarkData.map(d => ({ p: d.Periodo, t: (d.Desercion * 100).toFixed(2) + '%' })))}
+        DATOS DE "${subjectName}": ${JSON.stringify(subjectHistory)}
+        DATOS DE REFERENCIA ("${benchmarkName}"): ${JSON.stringify(benchmarkHistory)}
 
-        USA ESTE FORMATO DE REPORTE:
-        # 📄 REPORTE DE CONSULTORÍA: ${subjectName}
-        
-        ## 📊 Diagnóstico de Retención
-        Resume la situación actual (periodo ${allPeriods[0]}). Menciona la tasa exacta y su posición competitiva.
-        
-        ## 📈 Evolución y Tendencias
-        Analiza si ha mejorado o empeorado. Sé ejecutivo.
-        
-        ## ⚖️ Benchmarking vs ${benchmarkName}
-        | Periodo | Tasa ${subjectName} | Tasa ${benchmarkName} | Brecha (p.p.) |
-        | :--- | :--- | :--- | :--- |
-        (Incluye los últimos 5 periodos).
-        
-        ## 💡 Recomendación Estratégica
-        Una conclusión breve de alto nivel.
-        
-        Pregunta del usuario: "${finalQuery}"
+        INSTRUCCIONES:
+        1. Tu reporte debe ser sobre "${subjectName}". NO mezcles su historia con la de La Sabana, a menos que sea para comparar en la tabla.
+        2. Usa un tono ejecutivo y directo.
+        3. ESTRUCTURA (Markdown):
+           # 📄 ANÁLISIS ESTRATÉGICO: ${subjectName}
+           ## 📊 Estado Actual
+           Menciona la tasa del último periodo (${subjectHistory[0]?.p || 'N/A'}) y su ranking.
+           ## 📈 Tendencia Semestral
+           Comenta si la retención está mejorando.
+           ## ⚖️ Comparativa Sectorial (vs ${benchmarkName})
+           Genera una tabla Markdown con: Periodo, Tasa ${subjectName}, Tasa ${benchmarkName}, Diferencia.
+           ## 💡 Recomendación
+           Una frase de alto impacto.
+
+        Consulta del usuario: "${finalQuery}"
       `;
 
       const response = await ai.models.generateContent({ 
-        model: 'gemini-3-pro-preview', 
+        model: 'gemini-3-flash-preview', 
         contents: [{ parts: [{ text: prompt }] }] 
       });
       
-      setChatResponse(response.text || 'El motor de análisis no devolvió resultados.');
+      setChatResponse(response.text || 'Sin respuesta del consultor.');
     } catch (error: any) {
-      console.error("Gemini API Error:", error);
-      setChatResponse('Ocurrió un error en la conexión. Asegúrate de que el prompt sea específico y la conexión a internet sea estable.');
+      console.error("API Error:", error);
+      setChatResponse('Error de conexión con el motor de IA. Verifica tu API Key y conexión.');
     } finally {
       setLoading(false);
     }
@@ -446,12 +445,11 @@ const App: React.FC = () => {
                 <div className="relative z-10">
                   <div className="flex items-center gap-6 mb-8">
                     <div className="w-20 h-20 bg-white/20 backdrop-blur-2xl rounded-[2rem] flex items-center justify-center text-white border border-white/30 shadow-xl shrink-0"><Trophy size={40} /></div>
-                    <div><h2 className="text-4xl font-black tracking-tight">Consultoría Experta</h2><p className="text-indigo-100 text-xl font-medium opacity-80 mt-1">Análisis Comparativo e Inteligencia de Datos</p></div>
+                    <div><h2 className="text-4xl font-black tracking-tight">Consultoría Experta</h2><p className="text-indigo-100 text-xl font-medium opacity-80 mt-1">Inteligencia de Datos Aplicada</p></div>
                   </div>
-                  <p className="text-2xl leading-relaxed text-indigo-50 font-medium max-w-3xl">Genera reportes detallados, comparativas dinámicas contra líderes del sector y análisis de brechas territoriales.</p>
+                  <p className="text-2xl leading-relaxed text-indigo-50 font-medium max-w-3xl">Genera reportes comparativos rápidos sobre cualquier IES en Colombia frente a referentes de alta calidad.</p>
                 </div>
                 <div className="absolute -right-20 -bottom-20 w-96 h-96 bg-white/5 rounded-full blur-3xl"></div>
-                <div className="absolute left-1/2 top-10 opacity-10 animate-pulse"><Sparkles size={120} /></div>
               </div>
 
               {loading ? (
@@ -477,9 +475,9 @@ const App: React.FC = () => {
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                   <ExampleQuery icon={<TrendingDown />} title="Análisis del Rosario" text="Dame el análisis de la U Rosario comparado con La Sabana." onClick={(t) => handleAnalysis(undefined, t)} />
-                  <ExampleQuery icon={<Trophy />} title="Benchmark Sabana" text="Análisis estratégico de la U. de La Sabana frente a sus líderes competidores." onClick={(t) => handleAnalysis(undefined, t)} />
-                  <ExampleQuery icon={<Globe />} title="Liderazgo Territorial" text="¿Cuál es la universidad líder en deserción en el departamento de Antioquia?" onClick={(t) => handleAnalysis(undefined, t)} />
-                  <ExampleQuery icon={<Users />} title="Análisis de Matrícula" text="Relación entre número de matriculados y tasa de deserción en acreditadas." onClick={(t) => handleAnalysis(undefined, t)} />
+                  <ExampleQuery icon={<Trophy />} title="Benchmark Sabana" text="Análisis estratégico de la U. de La Sabana frente a Los Andes." onClick={(t) => handleAnalysis(undefined, t)} />
+                  <ExampleQuery icon={<Globe />} title="Liderazgo Territorial" text="Análisis de retención en el departamento de Antioquia." onClick={(t) => handleAnalysis(undefined, t)} />
+                  <ExampleQuery icon={<Users />} title="Análisis de Matrícula" text="Relación entre matriculados y deserción en universidades acreditadas." onClick={(t) => handleAnalysis(undefined, t)} />
                 </div>
               )}
             </div>
@@ -512,7 +510,6 @@ const StatCard: React.FC<{ label: string, value: string, subtitle: string, icon:
         <div className="text-4xl font-black text-slate-900 tracking-tighter tabular-nums">{value}</div>
         <div className="text-[11px] text-slate-500 font-bold italic opacity-70">{subtitle}</div>
       </div>
-      <div className={`absolute -right-4 -bottom-4 w-28 h-28 bg-${color}-50/40 rounded-full group-hover:scale-[3] transition-transform duration-700 pointer-events-none`}></div>
     </div>
   );
 };
