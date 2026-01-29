@@ -97,6 +97,7 @@ const App: React.FC = () => {
   const findMentionedIES = (q: string) => {
     const qLow = q.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""); 
     
+    // Mapeo directo por palabras clave comunes en Colombia
     if (qLow.includes("rosario")) return "1714";
     if (qLow.includes("andes")) return "1813";
     if (qLow.includes("javeriana")) return "1701";
@@ -105,9 +106,10 @@ const App: React.FC = () => {
     if (qLow.includes("eafit")) return "1712";
     if (qLow.includes("icesi")) return "1828";
     if (qLow.includes("externado")) return "1706";
+    if (qLow.includes("bolivariana") || qLow.includes("upb")) return "1710";
     if (qLow.includes("libre")) return "1807";
-    if (qLow.includes("norte") && qLow.includes("universidad")) return "1713";
     
+    // Búsqueda inteligente en la lista
     for (const ies of iesList) {
       const nameLow = ies.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
       if (qLow.includes(nameLow) && nameLow.length > 8) return ies.id;
@@ -126,61 +128,53 @@ const App: React.FC = () => {
     setActiveTab('chat');
 
     try {
-      const mentionedID = findMentionedIES(finalQuery);
-      const subjectID = mentionedID || selectedIES; 
-      
-      const subjectHistory = DATA_UNIVERSIDADES
-        .filter(d => d.IES === subjectID)
+      const subjectID = findMentionedIES(finalQuery) || selectedIES;
+      const subjectDataFull = DATA_UNIVERSIDADES.filter(d => d.IES === subjectID);
+      const subjectName = subjectDataFull[0]?.NombreInstitucion || 'Institución Seleccionada';
+
+      // Compactar datos para reducir el tamaño del prompt (Payload)
+      const subjectHistory = subjectDataFull
         .sort((a, b) => b.Periodo.localeCompare(a.Periodo))
-        .slice(0, 6) // Solo últimos 6 periodos para evitar carga pesada
+        .slice(0, 3) // Máximo 3 periodos para evitar timeout
         .map(d => ({ p: d.Periodo, t: (d.Desercion * 100).toFixed(2) + '%', r: d.Ranking }));
 
-      const subjectName = DATA_UNIVERSIDADES.find(d => d.IES === subjectID)?.NombreInstitucion || 'Institución';
-
-      const isConsultingSabana = subjectID === '1711';
-      const benchmarkID = isConsultingSabana ? '1813' : '1711';
+      const benchmarkID = subjectID === '1711' ? '1813' : '1711'; // Comparar contra Andes si es Sabana, sino contra Sabana
       const benchmarkHistory = DATA_UNIVERSIDADES
         .filter(d => d.IES === benchmarkID)
         .sort((a, b) => b.Periodo.localeCompare(a.Periodo))
-        .slice(0, 6)
+        .slice(0, 3)
         .map(d => ({ p: d.Periodo, t: (d.Desercion * 100).toFixed(2) + '%' }));
-      
-      const benchmarkName = isConsultingSabana ? 'Universidad de los Andes' : 'Universidad de La Sabana';
+
+      const benchmarkName = benchmarkID === '1813' ? 'U. de los Andes' : 'U. de La Sabana';
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const prompt = `
-        Actúa como un Consultor Senior en Retención Universitaria. 
-        Analiza la deserción de: "${subjectName}" (ID: ${subjectID}).
-        
-        DATOS DE "${subjectName}": ${JSON.stringify(subjectHistory)}
-        DATOS DE REFERENCIA ("${benchmarkName}"): ${JSON.stringify(benchmarkHistory)}
-
-        INSTRUCCIONES:
-        1. Tu reporte debe ser sobre "${subjectName}". NO mezcles su historia con la de La Sabana, a menos que sea para comparar en la tabla.
-        2. Usa un tono ejecutivo y directo.
-        3. ESTRUCTURA (Markdown):
-           # 📄 ANÁLISIS ESTRATÉGICO: ${subjectName}
-           ## 📊 Estado Actual
-           Menciona la tasa del último periodo (${subjectHistory[0]?.p || 'N/A'}) y su ranking.
-           ## 📈 Tendencia Semestral
-           Comenta si la retención está mejorando.
-           ## ⚖️ Comparativa Sectorial (vs ${benchmarkName})
-           Genera una tabla Markdown con: Periodo, Tasa ${subjectName}, Tasa ${benchmarkName}, Diferencia.
-           ## 💡 Recomendación
-           Una frase de alto impacto.
-
-        Consulta del usuario: "${finalQuery}"
-      `;
-
       const response = await ai.models.generateContent({ 
-        model: 'gemini-3-flash-preview', 
-        contents: [{ parts: [{ text: prompt }] }] 
+        model: 'gemini-3-flash-preview',
+        config: {
+          systemInstruction: "Eres un Consultor Senior experto en educación. Analiza la deserción de la IES SUJETO usando ÚNICAMENTE los datos proporcionados. No inventes datos ni menciones otras universidades fuera del benchmark solicitado.",
+        },
+        contents: `
+          Analiza la IES: ${subjectName}
+          Datos Sujeto: ${JSON.stringify(subjectHistory)}
+          Datos Benchmark (${benchmarkName}): ${JSON.stringify(benchmarkHistory)}
+          
+          Genera un reporte Markdown con:
+          # 📋 REPORTE: ${subjectName}
+          ## 📊 Situación Actual
+          Resume la tasa de deserción del periodo ${subjectHistory[0]?.p}.
+          ## ⚖️ Benchmark vs ${benchmarkName}
+          Crea una tabla con: Periodo, Tasa ${subjectName}, Tasa ${benchmarkName}.
+          ## 💡 Conclusión
+          Una recomendación estratégica breve.
+          
+          Pregunta: "${finalQuery}"
+        `
       });
       
-      setChatResponse(response.text || 'Sin respuesta del consultor.');
+      setChatResponse(response.text || 'Error: El modelo no devolvió contenido.');
     } catch (error: any) {
-      console.error("API Error:", error);
-      setChatResponse('Error de conexión con el motor de IA. Verifica tu API Key y conexión.');
+      console.error("Consultoría IA Error:", error);
+      setChatResponse(`No se pudo conectar con el motor de IA. Causas posibles: 1. API Key no configurada en Vercel. 2. Límite de cuota excedido. 3. El prompt es demasiado largo para la conexión actual.`);
     } finally {
       setLoading(false);
     }
@@ -302,7 +296,7 @@ const App: React.FC = () => {
           <div className="flex-1 max-w-xl">
             <div className="relative group">
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-600 transition-colors" size={18} />
-              <input type="text" placeholder="Consultar IES: 'Dame el análisis de la U Rosario'" className="w-full bg-slate-100 border-transparent rounded-full py-2.5 pl-12 pr-4 text-sm focus:ring-2 focus:ring-indigo-500/20 focus:bg-white transition-all outline-none" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleAnalysis()} />
+              <input type="text" placeholder="Consultar IES: 'Análisis de la U Rosario'" className="w-full bg-slate-100 border-transparent rounded-full py-2.5 pl-12 pr-4 text-sm focus:ring-2 focus:ring-indigo-500/20 focus:bg-white transition-all outline-none" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleAnalysis()} />
             </div>
           </div>
           <div className="flex items-center gap-4 ml-4">
